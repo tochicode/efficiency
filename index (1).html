@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>First-half scoring model</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#e9edf1;--panel:#fff;--ink:#16202b;--mute:#5d6b7a;--line:#d2d9e0;--board:#141c26;--amber:#f2a900;--good:#1f8a5b;--bad:#c23b3b;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#0e131a;--panel:#18202a;--ink:#e8edf2;--mute:#97a4b2;--line:#2a3541;--board:#070a0e;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Barlow,system-ui,sans-serif}
+header{background:var(--board);color:#fff;padding:28px 20px 24px}
+.wrap{max-width:1040px;margin:0 auto}
+h1{font:700 34px/1.1 "Barlow Condensed",sans-serif;margin:0 0 6px;color:var(--amber);letter-spacing:.5px}
+header p{margin:0;color:#aeb9c5;max-width:60ch}
+.score{display:flex;gap:28px;flex-wrap:wrap;margin-top:22px}
+.score div{min-width:130px}
+.score b{display:block;font:700 46px/1 "Barlow Condensed",sans-serif;color:var(--amber);font-variant-numeric:tabular-nums}
+.score span{font-size:14px;color:#aeb9c5}
+main{max-width:1040px;margin:0 auto;padding:20px;display:grid;grid-template-columns:300px 1fr;gap:20px}
+@media (max-width:820px){main{grid-template-columns:1fr}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:18px}
+h2{font:600 20px "Barlow Condensed",sans-serif;margin:0 0 12px}
+label{display:block;font-size:14px;color:var(--mute);margin:12px 0 4px}
+input[type=file]{width:100%;font-size:14px}
+input[type=number]{width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--ink);font:inherit}
+button{font:600 15px Barlow,sans-serif;padding:9px 14px;border-radius:4px;border:1px solid var(--ink);background:var(--ink);color:var(--bg);cursor:pointer;margin:14px 8px 0 0}
+button.alt{background:transparent;color:var(--ink)}
+button:focus-visible,input:focus-visible{outline:3px solid var(--amber);outline-offset:2px}
+.msg{margin-top:14px;font-size:14px;color:var(--mute)}.msg.err{color:var(--bad)}
+.tbl{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
+th,td{padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th:first-child,td:first-child,th.l,td.l{text-align:left}
+th{font-weight:600;color:var(--mute)}
+.win{color:var(--good);font-weight:600}
+.note{font-size:13px;color:var(--mute);margin-top:12px}
+.stack{display:grid;gap:20px}
+details{margin-top:10px;font-size:14px;color:var(--mute)}
+code{background:var(--bg);padding:1px 5px;border-radius:3px}
+</style>
+</head>
+<body>
+<header><div class="wrap">
+<h1>First-half scoring model</h1>
+<p>Upload completed games, check how well the model would have done on later games, then predict upcoming matchups. Everything runs in your browser; no data is uploaded.</p>
+<div class="score" id="score" hidden>
+<div><b id="s1">–</b><span>Model error, combined total</span></div>
+<div><b id="s2">–</b><span>Naive error, combined total</span></div>
+<div><b id="s3">–</b><span>Games in holdout</span></div>
+</div>
+</div></header>
+
+<main>
+<section>
+<h2>Data and settings</h2>
+<label for="hist">History CSV (completed games)</label>
+<input type="file" id="hist" accept=".csv,text/csv">
+<label for="up">Upcoming games CSV (optional)</label>
+<input type="file" id="up" accept=".csv,text/csv">
+<label for="win">Prior games in rolling average</label>
+<input type="number" id="win" value="10" min="1" max="50">
+<label for="minp">Minimum prior games per team</label>
+<input type="number" id="minp" value="3" min="1" max="20">
+<label for="tf">Holdout fraction (latest games)</label>
+<input type="number" id="tf" value="0.2" min="0.05" max="0.5" step="0.05">
+<button id="run">Run model</button><button class="alt" id="sample">Try sample data</button>
+<div class="msg" id="msg">Choose a history file, or try the sample data.</div>
+<details><summary>Required columns</summary>
+<p><code>date, league, home_team, away_team, home_h1_points, away_h1_points</code> and for each of <code>home</code> and <code>away</code>: <code>_h1_fgm, _h1_fga, _h1_3pm, _h1_fta, _h1_oreb, _h1_dreb, _h1_tov</code>. Optional: <code>half_minutes</code> (default 20). Dates as YYYY-MM-DD. Upcoming file: <code>date, league, home_team, away_team</code>.</p></details>
+</section>
+
+<div class="stack">
+<section id="valSec" hidden>
+<h2>Holdout results</h2>
+<div class="tbl"><table id="valTbl"></table></div>
+<p class="note">Errors are mean absolute error in points. Bias is prediction minus actual. The naive model uses each team's recent first-half average and ignores the opponent. Past accuracy does not guarantee future accuracy.</p>
+</section>
+<section id="predSec" hidden>
+<h2>Upcoming predictions</h2>
+<div class="tbl"><table id="predTbl"></table></div>
+<button id="dl">Download predictions CSV</button>
+</section>
+</div>
+</main>
+
+<script>
+"use strict";
+const STATS=["fgm","fga","3pm","fta","oreb","dreb","tov"];
+const REQ=["date","league","home_team","away_team","home_h1_points","away_h1_points",...["home","away"].flatMap(s=>STATS.map(x=>`${s}_h1_${x}`))];
+const ROLL=["points","poss","efg","tov_pct","orb_pct","ftr","opp_efg","opp_tov_pct","opp_orb_pct","opp_ftr","opp_points"];
+const $=id=>document.getElementById(id);
+let histText=null,upText=null,lastPred=[];
+
+function parseCSV(t){
+  const rows=[];let r=[],f="",q=false;
+  for(let i=0;i<t.length;i++){const c=t[i];
+    if(q){if(c=='"'){if(t[i+1]=='"'){f+='"';i++}else q=false}else f+=c}
+    else if(c=='"')q=true;
+    else if(c==","){r.push(f);f=""}
+    else if(c=="\n"||c=="\r"){if(c=="\r"&&t[i+1]=="\n")i++;r.push(f);f="";if(r.length>1||r[0]!=="")rows.push(r);r=[]}
+    else f+=c}
+  if(f!==""||r.length){r.push(f);rows.push(r)}
+  const h=rows.shift().map(s=>s.trim());
+  return rows.map(a=>Object.fromEntries(h.map((k,i)=>[k,(a[i]??"").trim()])));
+}
+const num=v=>v===""||v==null?NaN:Number(v);
+const div=(a,b)=>b?a/b:NaN;
+const mean=a=>{const v=a.filter(x=>!isNaN(x));return v.length?v.reduce((s,x)=>s+x,0)/v.length:NaN};
+
+function loadGames(text){
+  const rows=parseCSV(text);
+  if(!rows.length)throw Error("The history file has no rows.");
+  const miss=REQ.filter(c=>!(c in rows[0]));
+  if(miss.length)throw Error("Missing columns: "+miss.join(", "));
+  const games=rows.map((r,i)=>{
+    const g={date:Date.parse(r.date),league:r.league,home_team:r.home_team,away_team:r.away_team,half:r.half_minutes?num(r.half_minutes):20};
+    if(isNaN(g.date))throw Error(`Row ${i+2}: date "${r.date}" is not YYYY-MM-DD.`);
+    for(const s of ["home","away"]){g[s]={points:num(r[`${s}_h1_points`])};for(const x of STATS)g[s][x]=num(r[`${s}_h1_${x}`])}
+    return g}).sort((a,b)=>a.date-b.date);
+  games.forEach((g,i)=>g.id=i);
+  return games;
+}
+function four(a,b){
+  const poss=a.fga-a.oreb+a.tov+.44*a.fta;
+  return{poss,efg:div(a.fgm+.5*a["3pm"],a.fga),tov_pct:div(a.tov,a.fga+.44*a.fta+a.tov),orb_pct:div(a.oreb,a.oreb+b.dreb),ftr:div(a.fta,a.fga)};
+}
+function teamGames(games){
+  const out=[];
+  for(const g of games)for(const [s,o,h] of [["home","away",1],["away","home",0]]){
+    const own=four(g[s],g[o]),opp=four(g[o],g[s]);
+    out.push({id:g.id,date:g.date,league:g.league,team:g[s+"_team"],is_home:h,half:g.half,
+      st:{points:g[s].points,poss:own.poss,efg:own.efg,tov_pct:own.tov_pct,orb_pct:own.orb_pct,ftr:own.ftr,
+          opp_efg:opp.efg,opp_tov_pct:opp.tov_pct,opp_orb_pct:opp.orb_pct,opp_ftr:opp.ftr,opp_points:g[o].points}});
+  }
+  return out;
+}
+const avgRoll=h=>ROLL.map(k=>mean(h.map(o=>o.st[k])));
+
+function addPrior(tg,win,minp){
+  const groups=new Map();
+  for(const o of tg){const k=o.league+"|"+o.team;(groups.get(k)||groups.set(k,[]).get(k)).push(o)}
+  let dropped=0;const kept=[];
+  for(const arr of groups.values()){
+    arr.sort((a,b)=>a.date-b.date||a.id-b.id);
+    const cnt=new Map();arr.forEach(o=>cnt.set(o.date,(cnt.get(o.date)||0)+1));
+    const ok=arr.filter(o=>cnt.get(o.date)==1);dropped+=arr.length-ok.length;
+    ok.forEach((o,i)=>{o.prior=i>=minp?avgRoll(ok.slice(Math.max(0,i-win),i)):null;kept.push(o)});
+  }
+  const idx=new Map(kept.map(o=>[o.id+"|"+o.is_home,o]));
+  const rows=[];
+  for(const o of kept){const p=idx.get(o.id+"|"+(1-o.is_home));
+    if(o.prior&&p&&p.prior)rows.push({id:o.id,date:o.date,league:o.league,y:o.st.points,own:o.prior,opp:p.prior,is_home:o.is_home,half:o.half})}
+  rows.sort((a,b)=>a.date-b.date||a.id-b.id);
+  return{rows,dropped};
+}
+
+// ----- ridge regression (closed form), mirrors sklearn: median impute, standardise numerics, one-hot league, alpha=10
+function numVec(r){return[...r.own,...r.opp,r.is_home,r.half]}
+function fit(rows,leagues,alpha=10){
+  const X=rows.map(numVec),p=X[0].length;
+  const med=[],mu=[],sd=[];
+  for(let j=0;j<p;j++){
+    const col=X.map(r=>r[j]).filter(v=>!isNaN(v)).sort((a,b)=>a-b);
+    med[j]=col.length?col[Math.floor(col.length/2)]*0.5+col[Math.ceil((col.length-1)/2)]*0.5:0;
+    const f=X.map(r=>isNaN(r[j])?med[j]:r[j]);mu[j]=mean(f);
+    sd[j]=Math.sqrt(mean(f.map(v=>(v-mu[j])**2)))||1;
+  }
+  const m={med,mu,sd,leagues};
+  const Z=rows.map(r=>design(r,m));
+  const ym=mean(rows.map(r=>r.y)),n=Z.length,d=Z[0].length;
+  const A=Array.from({length:d},()=>new Array(d+1).fill(0));
+  const zm=Array.from({length:d},(_,j)=>mean(Z.map(z=>z[j])));
+  for(let a=0;a<n;a++){const z=Z[a],yc=rows[a].y-ym;
+    for(let i=0;i<d;i++){const zi=z[i]-zm[i];A[i][d]+=zi*yc;for(let j=0;j<d;j++)A[i][j]+=zi*(z[j]-zm[j])}}
+  for(let i=0;i<d;i++)A[i][i]+=alpha;
+  for(let c=0;c<d;c++){ // gauss-jordan, partial pivot
+    let pv=c;for(let r=c+1;r<d;r++)if(Math.abs(A[r][c])>Math.abs(A[pv][c]))pv=r;
+    [A[c],A[pv]]=[A[pv],A[c]];
+    for(let r=0;r<d;r++)if(r!==c){const k=A[r][c]/A[c][c];if(k)for(let j=c;j<=d;j++)A[r][j]-=k*A[c][j]}}
+  m.w=A.map((r,i)=>r[d]/r[i]);
+  m.b=ym-m.w.reduce((s,w,j)=>s+w*zm[j],0);
+  return m;
+}
+function design(r,m){
+  const v=numVec(r).map((x,j)=>((isNaN(x)?m.med[j]:x)-m.mu[j])/m.sd[j]);
+  return[...v,...m.leagues.map(l=>l===r.league?1:0)];
+}
+const predict=(m,r)=>design(r,m).reduce((s,x,j)=>s+x*m.w[j],m.b);
+
+// ----- validation
+const mae=a=>mean(a.map(Math.abs));
+function validate(rows,tf,leagues){
+  const dates=rows.map(r=>r.date).sort((a,b)=>a-b);
+  const pos=(1-tf)*(dates.length-1),lo=Math.floor(pos);
+  const cut=dates[lo]+(dates[Math.ceil(pos)]-dates[lo])*(pos-lo);
+  const train=rows.filter(r=>r.date<cut),test=rows.filter(r=>r.date>=cut);
+  if(!train.length||!test.length)throw Error("Not enough data for a chronological split.");
+  const m=fit(train,leagues),tm=mean(train.map(r=>r.y));
+  test.forEach(r=>{r.pred=predict(m,r);r.base=isNaN(r.own[0])?tm:r.own[0]});
+  const byG=new Map();test.forEach(r=>{(byG.get(r.id)||byG.set(r.id,[]).get(r.id)).push(r)});
+  const pairs=[...byG.values()].filter(a=>a.length==2);
+  const tot=k=>pairs.map(a=>a[0][k]+a[1][k]),act=tot("y");
+  return{cut,train:train.length,test:test.length,pairs:pairs.length,
+    team:{model:mae(test.map(r=>r.pred-r.y)),naive:mae(test.map(r=>r.base-r.y)),bm:mean(test.map(r=>r.pred-r.y)),bn:mean(test.map(r=>r.base-r.y))},
+    tot:pairs.length?{model:mae(tot("pred").map((v,i)=>v-act[i])),naive:mae(tot("base").map((v,i)=>v-act[i])),bm:mean(tot("pred").map((v,i)=>v-act[i])),bn:mean(tot("base").map((v,i)=>v-act[i]))}:null};
+}
+
+// ----- prediction
+function predictUpcoming(model,tg,upRows,win,minp){
+  const by=new Map();
+  for(const o of tg){const k=o.league+"|"+o.team;(by.get(k)||by.set(k,[]).get(k)).push(o)}
+  by.forEach(a=>a.sort((x,y)=>x.date-y.date||x.id-y.id));
+  const latest=(lg,t,d)=>{const h=(by.get(lg+"|"+t)||[]).filter(o=>o.date<d).slice(-win);return h.length>=minp?avgRoll(h):null};
+  return upRows.map(r=>{
+    const d=Date.parse(r.date),half=r.half_minutes?num(r.half_minutes):20;
+    const o={date:r.date,league:r.league,home:r.home_team,away:r.away_team};
+    const fh=latest(r.league,r.home_team,d),fa=latest(r.league,r.away_team,d);
+    if(!fh||!fa)return{...o,note:"Not enough history"};
+    const ph=predict(model,{own:fh,opp:fa,is_home:1,half,league:r.league}),pa=predict(model,{own:fa,opp:fh,is_home:0,half,league:r.league});
+    return{...o,ph,pa,pt:ph+pa,note:""};
+  });
+}
+
+// ----- UI
+const f1=v=>isNaN(v)?"–":v.toFixed(2),sg=v=>(v>=0?"+":"")+v.toFixed(2);
+function cell(t,cls){const c=document.createElement("td");c.textContent=t;if(cls)c.className=cls;return c}
+function renderTable(tbl,head,body){
+  tbl.replaceChildren();
+  const tr=document.createElement("tr");head.forEach(h=>{const th=document.createElement("th");th.textContent=h;tr.append(th)});
+  const th=document.createElement("thead");th.append(tr);tbl.append(th);
+  const tb=document.createElement("tbody");
+  body.forEach(r=>{const tr=document.createElement("tr");r.forEach(c=>tr.append(cell(...[].concat(c))));tb.append(tr)});
+  tbl.append(tb);
+}
+function say(t,err){const m=$("msg");m.textContent=t;m.className="msg"+(err?" err":"")}
+
+function run(){
+  try{
+    if(!histText)throw Error("Choose a history CSV first.");
+    const win=+$("win").value,minp=+$("minp").value,tf=+$("tf").value;
+    const games=loadGames(histText),tg=teamGames(games);
+    const {rows,dropped}=addPrior(tg,win,minp);
+    if(rows.length<20)throw Error("Not enough usable games. Each team needs at least "+minp+" earlier games on different dates.");
+    const leagues=[...new Set(rows.map(r=>r.league))].sort();
+    const v=validate(rows,tf,leagues);
+    $("score").hidden=false;
+    $("s1").textContent=v.tot?v.tot.model.toFixed(2):f1(v.team.model);
+    $("s2").textContent=v.tot?v.tot.naive.toFixed(2):f1(v.team.naive);
+    $("s3").textContent=v.tot?v.pairs:v.test;
+    const better=(a,b)=>a<b?"win l":"l";
+    const body=[[["Team points"],[f1(v.team.model),a=>0],[f1(v.team.naive)],[sg(v.team.bm)],[sg(v.team.bn)]]];
+    const mk=(n,x)=>[[n,"l"],[f1(x.model),x.model<x.naive?"win":""],[f1(x.naive)],[sg(x.bm)],[sg(x.bn)]];
+    const b2=[mk("Team points",v.team)];if(v.tot)b2.push(mk("Combined total",v.tot));
+    renderTable($("valTbl"),["Measure","Model error","Naive error","Model bias","Naive bias"],b2);
+    $("valSec").hidden=false;
+    let msg=`Trained on ${v.train} team-games, tested on ${v.test} from ${new Date(v.cut).toISOString().slice(0,10)} onward.`;
+    if(dropped)msg+=` Skipped ${dropped} team-games with two games on one date.`;
+    $("predSec").hidden=true;lastPred=[];
+    if(upText){
+      const model=fit(rows,leagues),up=parseCSV(upText);
+      const bad=["date","league","home_team","away_team"].filter(c=>!(c in (up[0]||{})));
+      if(bad.length)throw Error("Upcoming file is missing: "+bad.join(", "));
+      lastPred=predictUpcoming(model,tg,up,win,minp);
+      renderTable($("predTbl"),["Date","League","Home","Away","Home H1","Away H1","Total H1","Note"],
+        lastPred.map(p=>[[p.date,"l"],[p.league,"l"],[p.home,"l"],[p.away,"l"],[p.ph==null?"–":p.ph.toFixed(1)],[p.pa==null?"–":p.pa.toFixed(1)],[p.pt==null?"–":p.pt.toFixed(1)],[p.note,"l"]]));
+      $("predSec").hidden=false;
+    }
+    say(msg);
+  }catch(e){say(e.message,true)}
+}
+function readFile(inp,setter,label){
+  const f=inp.files[0];if(!f)return;
+  f.text().then(t=>{setter(t);say(`${label} loaded: ${f.name}. Select Run model.`)});
+}
+$("hist").onchange=e=>readFile(e.target,t=>histText=t,"History");
+$("up").onchange=e=>readFile(e.target,t=>upText=t,"Upcoming games");
+$("run").onclick=run;
+$("dl").onclick=()=>{
+  const h="date,league,home_team,away_team,pred_home_h1,pred_away_h1,pred_total_h1,note\n";
+  const q=s=>'"'+String(s).replace(/"/g,'""')+'"';
+  const body=lastPred.map(p=>[p.date,q(p.league),q(p.home),q(p.away),p.ph==null?"":p.ph.toFixed(1),p.pa==null?"":p.pa.toFixed(1),p.pt==null?"":p.pt.toFixed(1),p.note].join(",")).join("\n");
+  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([h+body],{type:"text/csv"}));a.download="predictions.csv";a.click();
+};
+$("sample").onclick=()=>{
+  let seed=42;const rnd=()=>(seed=(seed*1664525+1013904223)>>>0)/4294967296;
+  const nrm=()=>Math.sqrt(-2*Math.log(rnd()+1e-12))*Math.cos(2*Math.PI*rnd());
+  const teams=Array.from({length:16},(_,i)=>"Team_"+String(i).padStart(2,"0")),off={};teams.forEach(t=>off[t]=nrm()*3);
+  const cols=["date","league","home_team","away_team",...["home","away"].flatMap(s=>["points",...STATS].map(x=>`${s}_h1_${x}`))];
+  const lines=[cols.join(",")],d0=Date.UTC(2024,10,1);
+  for(let d=0;d<120;d++){
+    const date=new Date(d0+d*864e5).toISOString().slice(0,10),o=[...teams].sort(()=>rnd()-.5);
+    for(let i=0;i<16;i+=2){
+      const row=[date,"NCAAB",o[i],o[i+1]];
+      for(const [t,s] of [[o[i],"home"],[o[i+1],"away"]]){
+        const fga=Math.round(25+nrm()*3),fgm=Math.round(fga*Math.min(.7,Math.max(.25,.45+off[t]/200+nrm()*.05)));
+        const tpm=Math.round(fgm*(.2+rnd()*.2)),fta=Math.max(0,Math.round(9+nrm()*3));
+        const oreb=3+Math.floor(rnd()*6),dreb=10+Math.floor(rnd()*10),tov=4+Math.floor(rnd()*7);
+        const pts=2*(fgm-tpm)+3*tpm+Math.floor(fta*.72)+(s=="home"?2:0);
+        row.push(pts,fgm,fga,tpm,fta,oreb,dreb,tov);
+      }
+      lines.push(row.join(","));
+    }
+  }
+  histText=lines.join("\n");
+  upText="date,league,home_team,away_team\n2025-03-10,NCAAB,Team_00,Team_01\n2025-03-10,NCAAB,Team_02,Team_03\n2025-03-10,NCAAB,Team_04,Team_99";
+  run();
+};
+</script>
+</body>
+</html>
